@@ -1,0 +1,265 @@
+#!/bin/bash
+
+#
+# To use this SDK management with Intellij, redirect your Dart plugin to use
+# ~/dart/all_sdks/current.  This is a symlink that will be updated on sdk
+# activate commands to make sure that path always points to a valid
+# SDK.
+#
+# examples:
+#
+# sdk activate dev
+#   * Grabs the latest build from the dev channel
+# sdk activate stable
+#   * Grabs the latest build from the stable channel
+#
+# It can also be used for development of the SDK:
+#
+# sdk sync
+#   * Runs gclient runhooks and sync.
+# sdk build
+#   * Builds the entire SDK
+# sdk test analyzer
+#   * Runs unit tests appropriate for the Analyzer.
+# sdk install
+#   * Copies the built SDK into the all_sdks directory, creating a structure
+#     that will work (sans Dartium)
+# sdk activate latest
+#   * If you've built an SDK, repoint the current symlink to that.
+
+
+ARCH='x64'
+UARCH="$(echo $ARCH | tr '[:lower:]' '[:upper:]')"
+# xcodebuild/Release on Mac.
+SDK_PATH="out/Release${UARCH}"
+TOOL_OPTIONS="--arch ${ARCH} --mode release"
+TEST_OPTIONS="--progress color --report"
+ALL_SDKS="${HOME}/dart/all_sdks"
+MAX_LOCAL_SDKS=5
+
+
+sdk_build() {
+  set -ex
+  ./tools/build.py ${TOOL_OPTIONS} "$@" create_sdk
+  set +ex
+}
+
+# TODO(jcollins): cache this?  or find a better way to determine the latest
+#                 version
+get_latest() {
+  channel="$1"
+  # We are really just trying to read the redirect and pull the version out
+  # of the URL.
+  wget -O /dev/null "http://api.dartlang.org/${channel}" 2>&1 \
+    | egrep 'Location: .*index.html' \
+    | cut -f 5 -d /
+}
+
+sdk_download() {
+  local version="$1"
+  local channel="stable"
+  local arch="linux-x64"
+
+  if echo "${version}" | grep -q dev ; then
+    channel=dev
+  fi
+
+  local base="https://storage.googleapis.com/dart-archive/channels"
+  local name
+  local named="dartsdk-${arch}-release.zip"
+  local namedm="dartium-${arch}-release.zip"
+  local url
+  local urld="${base}/${channel}/release/$1/sdk/${named}"
+  local urldm="${base}/${channel}/release/$1/dartium/${namedm}"
+
+  set -ex
+  local tmpdir=`mktemp -d /tmp/sdk_download.XXXXXX`
+  cd "${tmpdir}"
+  for url in "${urld}" "${urldm}" ; do
+    wget "${url}"
+  done
+  for name in "${named}" "${namedm}" ; do
+    unzip -q "${name}"
+  done
+  for dartium in dartium* ; do
+    if [ "${dartium}" != "${namedm}" ] ; then
+      mv "${dartium}" dart-sdk/chromium
+    fi
+  done
+  mkdir -p "${ALL_SDKS}"
+  mv dart-sdk "${ALL_SDKS}/${version}"
+}
+
+sdk_cleanup() {
+  local sdk
+  local sdks=$(cd ${ALL_SDKS} && ls -dr --sort=time --time=ctime sdk.${ARCH}.*)
+  local sdk_count=$(echo ${sdks} | wc -w)
+  local sdks_to_delete=$[${sdk_count} - ${MAX_LOCAL_SDKS}]
+  local current_link=$(readlink ${ALL_SDKS}/current)
+  for sdk in ${sdks} ; do {
+    if [ "${sdks_to_delete}" -le 0 ] ; then break ; fi
+    if [ "${sdk}" == "${current_link}" ] ; then
+      continue
+    fi
+    if [ "${ALL_SDKS}/${sdk}" == "/" ] ; then
+      echo "sanity check failed, tried to rm -rf /" >&2
+      exit 2
+    else
+      set -ex
+      rm -rf "${ALL_SDKS}/${sdk}"
+      set +ex
+    fi
+    sdks_to_delete=$[${sdks_to_delete} - 1]
+  } ; done
+}
+
+sdk_activate() {
+  local version="$1"
+  local package count
+  shift
+
+  case "$version" in
+    current)
+      echo "$0: current: no change" >&2
+      return 0
+      ;;
+    dev|stable)
+      sdk_activate $(get_latest "${version}")
+      return $?
+      ;;
+    latest)
+      package="$(cd ${ALL_SDKS} && ls -da --sort=time --time=ctime sdk.* | head -n 1)"
+      count="$(cd ${ALL_SDKS} && ls -da sdk.* | wc -l)"
+      sdk_activate "${package}"
+      return $?
+      ;;
+    *)
+      if [ ! -e "${ALL_SDKS}/${version}" ] ; then
+        sdk_download "${version}"
+      fi
+      ;;
+  esac
+  (cd $ALL_SDKS ; ln -sfn "${version}" current) || exit 2
+  echo "activated: $(readlink ${ALL_SDKS}/current)"
+}
+
+sdk_install() {
+  local new_sdk_path="sdk.${ARCH}.$(date +%Y%m%d-%H%M%S)"
+  set -ex
+  mkdir -p "${ALL_SDKS}"
+  cp -a "${SDK_PATH}/dart-sdk" "${ALL_SDKS}/${new_sdk_path}"
+  set +ex
+  sdk_cleanup
+}
+
+sdk_sync() {
+  set -ex
+  gclient runhooks
+  gclient sync
+  set +ex
+}
+
+sdk_test() {
+  local package="$1"
+  shift
+  [ -z "$package" ] && package=all
+  set -ex
+  case "$package" in
+    analyzer)
+      ./tools/test.py ${TEST_OPTIONS} ${TOOL_OPTIONS} "$@" \
+        --checked pkg/analyzer/
+      ./tools/test.py ${TEST_OPTIONS} ${TOOL_OPTIONS} "$@" \
+        --checked pkg/analysis_server
+      ./tools/test.py ${TEST_OPTIONS} ${TOOL_OPTIONS} "$@" \
+        --compiler dart2analyzer --runtime none --tasks=2
+      ;;
+    all)
+      ./tools/test.py ${TEST_OPTIONS} ${TOOL_OPTIONS} "$@" \
+        --compiler=none,dart2js --runtime=vm,d8,drt,chrome,dartium,ff,safari
+      ;;
+    *)
+      echo Unknown package "$package" >&2
+      echo Select one of: analyzer all >&2
+      return 2
+      ;;
+  esac
+  set +ex
+}
+
+# Changes working directory to the root of the sdk if we can.
+find_sdk_and_chain() {
+  local cmd="$1"
+  shift
+
+  # Maybe we are one directory above, in which case dive in.
+  if [ -d "sdk" -a -e ".gclient" ] ; then cd sdk ; fi
+
+  # Otherwise assume we are too deep in the tree and cd upwards until we find
+  # something that looks like the sdk root.
+  while true ; do
+    if [ $(pwd) == '/' ] ; then
+      cat >&2 <<ENDERROR
+$0 : dart sdk not found
+Command "${cmd}" requires a current working directory under dart-sdk.
+ENDERROR
+      return 2
+    fi
+    if [ -e README.dart-sdk -a -e tools/build.py ] ; then
+      break
+    fi
+    cd ..
+  done
+  echo `pwd`
+  # Actually execute the command.
+  "sdk_${cmd}" "$@"
+}
+
+
+main () {
+  local cmd="$1"
+  shift
+
+  if [ ! -e "${ALL_SDKS}/.sdk_tool_owns_this" ] ; then
+    echo "Create a directory: ${ALL_SDKS} and a file .sdk_tool_owns_this" >&2
+    echo "within that directory to use this tool.  There are autocleanups" >&2
+    echo "in this script that might remove something if you have" >&2
+    echo "preexisting files there." >&2
+    exit 2
+  fi
+
+  case "$cmd" in
+    help)
+       cat <<ENDHELP
+sdk: build and run tests for the Dart SDK
+
+Usage:  sdk [command] [options]
+
+Available commands:
+
+help
+sync
+build
+test [package]
+install
+activate [version]
+download [version]
+cleanup
+ENDHELP
+      ;;
+    sync | build | test | install)
+      find_sdk_and_chain "$cmd" "$@"
+      ;;
+    activate | download | cleanup)
+      "sdk_$cmd" "$@"
+      ;;
+    *)
+      main help
+      ;;
+  esac
+}
+
+if [ `basename $0` == "sdk" ] ; then
+  main "$@"
+  exit $?
+fi
+
