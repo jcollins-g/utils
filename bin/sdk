@@ -58,7 +58,12 @@ get_latest() {
 sdk_download() {
   local version="$1"
   local channel="stable"
-  local arch="linux-x64"
+  local arch
+  if uname | grep -q Darwin ; then
+    arch="macos-x64"
+  else
+    arch="linux-x64"
+  fi
 
   if echo "${version}" | grep -q dev ; then
     channel=dev
@@ -75,17 +80,17 @@ sdk_download() {
   set -ex
   local tmpdir=`mktemp -d /tmp/sdk_download.XXXXXX`
   cd "${tmpdir}"
-  for url in "${urld}" "${urldm}" ; do
+  for url in "${urld}" ; do
     wget "${url}"
   done
-  for name in "${named}" "${namedm}" ; do
+  for name in "${named}" ; do
     unzip -q "${name}"
   done
-  for dartium in dartium* ; do
-    if [ "${dartium}" != "${namedm}" ] ; then
-      mv "${dartium}" dart-sdk/chromium
-    fi
-  done
+  #for dartium in dartium* ; do
+  #  if [ "${dartium}" != "${namedm}" ] ; then
+  #    mv "${dartium}" dart-sdk/chromium
+  #  fi
+  #done
   mkdir -p "${ALL_SDKS}"
   mv dart-sdk "${ALL_SDKS}/${version}"
 }
