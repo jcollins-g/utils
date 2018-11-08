@@ -17,7 +17,7 @@ pull() {
   [ -z "$sourceHost" ] && echo "Source host required" && exit 1
   set -ex
   mkdir -p $DART_DIR_LOCAL && cd $DART_DIR_LOCAL
-  _rsync . $sourceHost:dart/ .
+  _rsync $sourceHost:dart/ .
 }
 
 case "$1" in
