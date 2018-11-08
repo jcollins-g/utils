@@ -30,8 +30,12 @@
 
 ARCH='x64'
 UARCH="$(echo $ARCH | tr '[:lower:]' '[:upper:]')"
-# xcodebuild/Release on Mac.
-SDK_PATH="out/Release${UARCH}"
+if uname | grep -q Darwin ; then
+  SDK_PATH="xcodebuild/Release${UARCH}"
+else
+  SDK_PATH="out/Release${UARCH}"
+fi
+ 
 TOOL_OPTIONS="--arch ${ARCH} --mode release"
 TEST_OPTIONS="--progress color --report"
 ALL_SDKS="${HOME}/dart/all_sdks"

@@ -1,0 +1,28 @@
+#!/bin/sh
+DART_DIR_LOCAL=~/dart
+
+_rsync() {
+  rsync -a --stats --delete --human-readable --exclude '/sdk/sdk/out/**' --exclude '/sdk/sdk/xcodebuild/**' --exclude pubspec.lock --exclude ".packages" --exclude '.idea/**' --exclude '*.iml' --include '/sdk/sdk/.packages' --exclude '/all_sdks' -e "ssh -C" "$@"
+}
+
+push() {
+  destHost="$1"
+  [ -z "$destHost" ] && echo "Destination host required" && exit 1
+  mkdir -p $DART_DIR_LOCAL && cd $DART_DIR_LOCAL
+  _rsync . $destHost:dart/
+}
+
+pull() {
+  sourceHost="$1"
+  [ -z "$sourceHost" ] && echo "Source host required" && exit 1
+  set -ex
+  mkdir -p $DART_DIR_LOCAL && cd $DART_DIR_LOCAL
+  _rsync . $sourceHost:dart/ .
+}
+
+case "$1" in
+  push) push "$2" ; break ;;
+  pull) pull "$2" ; break ;;
+  *) echo "Usage:  $0 [push|pull] [hostname]" ;;
+esac
+
